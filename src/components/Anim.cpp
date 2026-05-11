@@ -138,11 +138,6 @@ void AnimSkin::LoadFromNif(NifFile* loadFromFile, NiShape* shape) {
 		boneWeights[newID].LoadFromNif(loadFromFile, shape, newID);
 		boneNames[node->name.get()] = newID;
 		if (!gotGTS) {
-			// We don't have a global-to-skin transform, probably because
-			// the NIF has BSSkinBoneData instead of NiSkinData (FO4 or
-			// newer).  So calculate by:
-			// Compose: skin -> bone -> global
-			// and inverting.
 			MatTransform xformBoneToGlobal;
 			if (AnimSkeleton::getInstance().GetBoneTransformToGlobal(node->name.get(), xformBoneToGlobal)) {
 				eachXformGlobalToSkin.push_back(xformBoneToGlobal.ComposeTransforms(boneWeights[newID].xformSkinToBone).InverseTransform());
@@ -150,8 +145,34 @@ void AnimSkin::LoadFromNif(NifFile* loadFromFile, NiShape* shape) {
 		}
 		newID++;
 	}
-	if (!eachXformGlobalToSkin.empty())
+
+	// SF NIFs have no bone NiNodes — use bone names from SkinAttach instead
+	if (newID == 0) {
+		std::vector<std::string> nameList;
+		loadFromFile->GetShapeBoneList(shape, nameList);
+		for (auto& bn : nameList) {
+			boneWeights[newID].LoadFromNif(loadFromFile, shape, newID);
+			boneNames[bn] = newID;
+			if (!gotGTS) {
+				MatTransform xformBoneToGlobal;
+				if (AnimSkeleton::getInstance().GetBoneTransformToGlobal(bn, xformBoneToGlobal)) {
+					eachXformGlobalToSkin.push_back(xformBoneToGlobal.ComposeTransforms(boneWeights[newID].xformSkinToBone).InverseTransform());
+				}
+			}
+			newID++;
+		}
+	}
+
+	if (!eachXformGlobalToSkin.empty()) {
 		xformGlobalToSkin = CalcMedianMatTransform(eachXformGlobalToSkin);
+
+		// SF skeleton transforms are in meters but mesh vertices are scaled
+		// by havokScale (69.969) during loading — match the translation
+		if (loadFromFile->GetHeader().GetVersion().IsSF()) {
+			constexpr float havokScale = 69.969f;
+			xformGlobalToSkin.translation *= havokScale;
+		}
+	}
 }
 
 bool AnimInfo::LoadFromNif(NifFile* nif) {
@@ -183,9 +204,16 @@ bool AnimInfo::LoadFromNif(NifFile* nif, NiShape* shape, bool newRefNif) {
 	for (auto& bn : boneNames) {
 		if (!AnimSkeleton::getInstance().RefBone(bn)) {
 			AnimBone* cstm = AnimSkeleton::getInstance().LoadCustomBoneFromNif(nif, bn);
-			if (!cstm->isStandardBone)
-				nonRefBones += bn + "\n";
-			AnimSkeleton::getInstance().RefBone(bn);
+			if (!cstm) {
+				// SF body NIFs have no bone NiNodes — look up in the reference skeleton
+				NifFile& skelNif = AnimSkeleton::getInstance().refSkeletonNif;
+				cstm = AnimSkeleton::getInstance().LoadCustomBoneFromNif(&skelNif, bn);
+			}
+			if (cstm) {
+				if (!cstm->isStandardBone)
+					nonRefBones += bn + "\n";
+				AnimSkeleton::getInstance().RefBone(bn);
+			}
 		}
 
 		shapeBones[shapeName].push_back(bn);
